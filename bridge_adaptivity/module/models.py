@@ -69,11 +69,28 @@ class Sequence(models.Model):
     lis_result_sourcedid = models.CharField(max_length=255, null=True)
     outcome_service = models.ForeignKey(OutcomeService, null=True)
 
+    metadata = JSONField(default={}, blank=True)
+
     class Meta:
         unique_together = (('lti_user', 'collection', 'group'), ('lis_result_sourcedid', 'outcome_service'))
 
     def __str__(self):
         return '<Sequence[{}]: {}>'.format(self.id, self.lti_user)
+
+    def fulfil_sequence_metadata(self, lti_params, launch_params):
+        """
+        Automate fulfilling sequence metadata field with launch_params equal to lti_params.
+
+        :param lti_params: iterable object with the required lti parameters names
+        :param launch_params: dict with the launch lti parameters received in launch lti request
+        """
+        meta_dict = {}
+        for param in lti_params:
+            if param in launch_params:
+                meta_dict[param] = launch_params[param]
+        if meta_dict:
+            self.metadata = meta_dict
+            self.save()
 
 
 @python_2_unicode_compatible
@@ -86,6 +103,11 @@ class SequenceItem(models.Model):
     score = models.FloatField(null=True, blank=True, help_text="Grade policy: 'p' (problem's current score).")
 
     is_problem = models.BooleanField(default=True)
+    __origin_score = None
+
+    def __init__(self, *args, **kwargs):
+        super(SequenceItem, self).__init__(*args, **kwargs)
+        self.__origin_score = self.score
 
     class Meta:
         verbose_name = "Sequence Item"
@@ -97,6 +119,12 @@ class SequenceItem(models.Model):
 
     def save(self, *args, **kwargs):
         """Extension sending notification to the Adaptive engine that score is changed."""
+        if self.score != self.__origin_score:
+            engine = self.sequence.group.engine.engine_driver
+            engine.submit_activity_answer(self)
+            log.debug("Adaptive engine is updated with the grade for the {} activity in the SequenceItem {}".format(
+                self.activity.name, self.id
+            ))
         self.is_problem = self.activity.is_problem
         super(SequenceItem, self).save(*args, **kwargs)
 
@@ -203,6 +231,11 @@ class Engine(ModelFieldIsDefaultMixin, models.Model):
     engine_name = models.CharField(max_length=255, blank=True, null=True, unique=True)
     host = models.URLField(blank=True, null=True)
     token = models.CharField(max_length=255, blank=True, null=True)
+    lti_parameters = models.TextField(
+        default='',
+        blank=True,
+        help_text=_("LTI parameters to sent to the engine, use comma separated string")
+    )
     is_default = fields.BooleanField(default=False, help_text=_("If checked Engine will be used as the default!"))
 
     class Meta:
@@ -231,6 +264,10 @@ class Engine(ModelFieldIsDefaultMixin, models.Model):
                 engine_driver = driver(**{'HOST': self.host, 'TOKEN': self.token})
             self.DRIVER = engine_driver
         return self.DRIVER
+
+    @property
+    def lti_params(self):
+        return (param.strip() for param in self.lti_parameters.split(','))
 
 
 @python_2_unicode_compatible
